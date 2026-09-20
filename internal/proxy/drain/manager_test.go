@@ -29,7 +29,7 @@ import (
 // reason-profile wiring can be asserted without the full write coordinator.
 type captureMover struct{ req *writepath.MoveRequest }
 
-func (m *captureMover) DeleteOrEnqueue(context.Context, backend.ObjectBackend, string, string, string, int64) {
+func (m *captureMover) DeleteOrEnqueue(context.Context, backend.ObjectBackend, *core.CleanupRequest) {
 }
 
 func (m *captureMover) MoveObject(_ context.Context, req *writepath.MoveRequest) (int64, error) {
@@ -72,7 +72,7 @@ func TestCopyAndRemoveSource_UsesDrainMoveReasons(t *testing.T) {
 		func(context.Context, string) {},
 		func(context.Context) (int, int) { return 0, 0 })
 
-	obj := &core.ObjectLocation{ObjectKey: "k", SizeBytes: 50, BackendName: "src"}
+	obj := &core.ObjectLocation{ObjectKey: "k", StorageKey: "k!on-src", SizeBytes: 50, BackendName: "src"}
 	if !mgr.copyAndRemoveSource(context.Background(), srcBe, "src", obj) {
 		t.Fatal("copyAndRemoveSource returned false, want true")
 	}

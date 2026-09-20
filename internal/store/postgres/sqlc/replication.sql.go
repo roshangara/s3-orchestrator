@@ -38,7 +38,7 @@ WITH over_replicated AS (
     HAVING COUNT(*) > $1::bigint
     LIMIT $2
 )
-SELECT ol.object_key, ol.backend_name, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.created_at
+SELECT ol.object_key, ol.backend_name, ol.storage_key, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.created_at
 FROM object_locations ol
 JOIN over_replicated orep ON ol.object_key = orep.object_key
 ORDER BY ol.object_key ASC, ol.created_at ASC
@@ -52,6 +52,7 @@ type GetOverReplicatedObjectsParams struct {
 type GetOverReplicatedObjectsRow struct {
 	ObjectKey                string
 	BackendName              string
+	StorageKey               string
 	SizeBytes                int64
 	Encrypted                bool
 	EncryptionKey            []byte
@@ -77,6 +78,7 @@ func (q *Queries) GetOverReplicatedObjects(ctx context.Context, arg GetOverRepli
 		if err := rows.Scan(
 			&i.ObjectKey,
 			&i.BackendName,
+			&i.StorageKey,
 			&i.SizeBytes,
 			&i.Encrypted,
 			&i.EncryptionKey,
@@ -116,7 +118,7 @@ under_replicated AS (
     HAVING COUNT(*) + COALESCE(i.copies, 0) < $1::bigint
     LIMIT $2
 )
-SELECT ol.object_key, ol.backend_name, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.created_at
+SELECT ol.object_key, ol.backend_name, ol.storage_key, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.created_at
 FROM object_locations ol
 JOIN under_replicated ur ON ol.object_key = ur.object_key
 ORDER BY ol.object_key ASC, ol.created_at ASC
@@ -130,6 +132,7 @@ type GetUnderReplicatedObjectsParams struct {
 type GetUnderReplicatedObjectsRow struct {
 	ObjectKey                string
 	BackendName              string
+	StorageKey               string
 	SizeBytes                int64
 	Encrypted                bool
 	EncryptionKey            []byte
@@ -172,6 +175,7 @@ func (q *Queries) GetUnderReplicatedObjects(ctx context.Context, arg GetUnderRep
 		if err := rows.Scan(
 			&i.ObjectKey,
 			&i.BackendName,
+			&i.StorageKey,
 			&i.SizeBytes,
 			&i.Encrypted,
 			&i.EncryptionKey,
@@ -210,7 +214,7 @@ under_replicated AS (
     HAVING COUNT(*) + COALESCE(i.copies, 0) < $2::bigint
     LIMIT $3
 )
-SELECT ol.object_key, ol.backend_name, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.created_at
+SELECT ol.object_key, ol.backend_name, ol.storage_key, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.created_at
 FROM object_locations ol
 JOIN under_replicated ur ON ol.object_key = ur.object_key
 ORDER BY ol.object_key ASC, ol.created_at ASC
@@ -225,6 +229,7 @@ type GetUnderReplicatedObjectsExcludingParams struct {
 type GetUnderReplicatedObjectsExcludingRow struct {
 	ObjectKey                string
 	BackendName              string
+	StorageKey               string
 	SizeBytes                int64
 	Encrypted                bool
 	EncryptionKey            []byte
@@ -254,6 +259,7 @@ func (q *Queries) GetUnderReplicatedObjectsExcluding(ctx context.Context, arg Ge
 		if err := rows.Scan(
 			&i.ObjectKey,
 			&i.BackendName,
+			&i.StorageKey,
 			&i.SizeBytes,
 			&i.Encrypted,
 			&i.EncryptionKey,
@@ -277,8 +283,8 @@ func (q *Queries) GetUnderReplicatedObjectsExcluding(ctx context.Context, arg Ge
 }
 
 const insertReplicaConditional = `-- name: InsertReplicaConditional :one
-INSERT INTO object_locations (object_key, backend_name, size_bytes, encrypted, encryption_key, key_id, plaintext_size, content_hash, compression_algorithm, compression_level, compression_format_version, logical_size, etag, content_type, user_metadata, created_at)
-SELECT $1::text, $2::text, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.etag, ol.content_type, ol.user_metadata, ol.created_at
+INSERT INTO object_locations (object_key, backend_name, storage_key, size_bytes, encrypted, encryption_key, key_id, plaintext_size, content_hash, compression_algorithm, compression_level, compression_format_version, logical_size, etag, content_type, user_metadata, created_at)
+SELECT $1::text, $2::text, $3::text, ol.size_bytes, ol.encrypted, ol.encryption_key, ol.key_id, ol.plaintext_size, ol.content_hash, ol.compression_algorithm, ol.compression_level, ol.compression_format_version, ol.logical_size, ol.etag, ol.content_type, ol.user_metadata, ol.created_at
 FROM object_locations ol
 JOIN backend_quotas q ON q.backend_name = $2::text
 LEFT JOIN (
@@ -295,7 +301,7 @@ LEFT JOIN (
     SELECT backend_name, SUM(size_bytes) AS inflight
     FROM pending_objects GROUP BY backend_name
 ) p ON p.backend_name = q.backend_name
-WHERE ol.object_key = $1::text AND ol.backend_name = $3
+WHERE ol.object_key = $1::text AND ol.backend_name = $4
   AND (q.bytes_limit = 0
        OR q.bytes_limit
           - GREATEST(0, COALESCE(s.bytes_used, 0))::bigint
@@ -309,6 +315,7 @@ RETURNING size_bytes
 type InsertReplicaConditionalParams struct {
 	ObjectKey     string
 	TargetBackend string
+	StorageKey    string
 	SourceBackend string
 }
 
@@ -332,8 +339,19 @@ type InsertReplicaConditionalParams struct {
 // Cast for the reason the pending claim casts: these parameters appear both in
 // this SELECT list, where a bare parameter takes no type from the INSERT
 // target, and in the predicates below.
+//
+// storage_key is the caller's, not the source row's: the replica is a new set
+// of bytes at a path of its own, so it is named after the write that placed it
+// the same way a PUT's copy is. Carrying the source's path would put two rows
+// on two backends at one name again, and a cleanup for either would then have
+// to guess which bytes it meant.
 func (q *Queries) InsertReplicaConditional(ctx context.Context, arg InsertReplicaConditionalParams) (int64, error) {
-	row := q.db.QueryRow(ctx, insertReplicaConditional, arg.ObjectKey, arg.TargetBackend, arg.SourceBackend)
+	row := q.db.QueryRow(ctx, insertReplicaConditional,
+		arg.ObjectKey,
+		arg.TargetBackend,
+		arg.StorageKey,
+		arg.SourceBackend,
+	)
 	var size_bytes int64
 	err := row.Scan(&size_bytes)
 	return size_bytes, err

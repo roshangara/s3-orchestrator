@@ -22,7 +22,7 @@
 --
 -- bytes_limit = 0 is unlimited, matching every other reader of the column.
 INSERT INTO pending_objects (
-    intent_id, object_key, backend_name, size_bytes,
+    intent_id, object_key, storage_key, backend_name, size_bytes,
     encrypted, encryption_key, key_id, plaintext_size, content_hash,
     compression_algorithm, compression_level, compression_format_version, logical_size,
     etag, content_type, user_metadata, role
@@ -32,7 +32,7 @@ INSERT INTO pending_objects (
 -- no type from the INSERT target the way one in VALUES does, so Postgres would
 -- otherwise deduce them from the arithmetic in the WHERE, come out with
 -- integer, and reject the statement for contradicting the bigint column.
-SELECT @intent_id, @object_key, @backend_name::text, @size_bytes::bigint,
+SELECT @intent_id, @object_key, @storage_key, @backend_name::text, @size_bytes::bigint,
        @encrypted, @encryption_key, @key_id, @plaintext_size, @content_hash,
        @compression_algorithm, @compression_level, @compression_format_version, @logical_size,
        @etag, @content_type, @user_metadata, @role
@@ -71,7 +71,7 @@ WHERE q.backend_name = @backend_name::text
 DELETE FROM pending_objects
 WHERE object_key = @object_key
   AND intent_id <> ALL(@keep::text[])
-RETURNING intent_id, backend_name, size_bytes;
+RETURNING intent_id, backend_name, storage_key, size_bytes;
 
 -- name: DeletePendingObject :exec
 DELETE FROM pending_objects WHERE intent_id = $1;
@@ -79,10 +79,13 @@ DELETE FROM pending_objects WHERE intent_id = $1;
 -- name: GetStalePendingObjects :many
 -- Return pending intents older than @older_than for reaper resolution.
 -- Bounded by @max_keys per call so a backlog cannot starve other queries.
+-- Column order follows the table so sqlc projects the row onto the shared
+-- pending_objects model rather than minting a query-specific struct; storage_key
+-- is last because that is where the migration added it.
 SELECT intent_id, object_key, backend_name, size_bytes,
        encrypted, encryption_key, key_id, plaintext_size, content_hash, created_at,
        compression_algorithm, compression_level, compression_format_version, logical_size,
-       etag, content_type, user_metadata, role
+       etag, content_type, user_metadata, role, storage_key
 FROM pending_objects
 WHERE created_at <= @older_than
 ORDER BY created_at ASC
@@ -101,10 +104,13 @@ DELETE FROM pending_objects WHERE backend_name = $1;
 -- both attempt to promote the same intent. pgx.ErrNoRows means another
 -- instance already resolved this intent (deleted the row); the caller
 -- treats that as a benign no-op.
+-- Column order follows the table so sqlc projects the row onto the shared
+-- pending_objects model rather than minting a query-specific struct; storage_key
+-- is last because that is where the migration added it.
 SELECT intent_id, object_key, backend_name, size_bytes,
        encrypted, encryption_key, key_id, plaintext_size, content_hash, created_at,
        compression_algorithm, compression_level, compression_format_version, logical_size,
-       etag, content_type, user_metadata, role
+       etag, content_type, user_metadata, role, storage_key
 FROM pending_objects
 WHERE intent_id = $1
 FOR UPDATE;

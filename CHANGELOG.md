@@ -3,6 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
+## [unreleased]
+
+### Fixed
+- fix(store): store each write's bytes under a path of its own (#1527)
+
+
 ## [0.121.0] - 2026-09-03
 
 ### Added

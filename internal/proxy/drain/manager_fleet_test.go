@@ -93,12 +93,13 @@ func stubDeleteObjectLocation(c *drainCalls, size int64, err error) func(context
 }
 
 // stubDrainEnqueue captures EnqueueCleanup calls.
-func stubDrainEnqueue(c *drainCalls) func(context.Context, string, string, string, int64) error {
-	return func(_ context.Context, backend, key, reason string, size int64) error {
+func stubDrainEnqueue(c *drainCalls) func(context.Context, *core.CleanupRequest) error {
+	return func(_ context.Context, req *core.CleanupRequest) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		c.enqueue = append(c.enqueue, core.CleanupItem{
-			BackendName: backend, ObjectKey: key, Reason: reason, SizeBytes: size,
+			BackendName: req.BackendName, ObjectKey: req.ObjectKey, StorageKey: req.StorageKey,
+			Reason: req.Reason, SizeBytes: req.SizeBytes,
 		})
 		return nil
 	}
@@ -158,10 +159,10 @@ func TestPurgeBackendObjects_DeletesDBRecords(t *testing.T) {
 	if !keys["obj1"] || !keys["obj2"] {
 		t.Errorf("expected obj1 and obj2 to be deleted, got %v", keys)
 	}
-	if be.Has("obj1") {
+	if be.HasCopyOf("obj1") {
 		t.Error("obj1 should have been deleted from S3 be")
 	}
-	if be.Has("obj2") {
+	if be.HasCopyOf("obj2") {
 		t.Error("obj2 should have been deleted from S3 be")
 	}
 	if got := rt.Usage().Backend().Load("b1", counter.FieldAPIRequests); got != 2 {
@@ -345,11 +346,11 @@ func TestDrainOneObject_ReplicaExists_DeletesSourceWithSize(t *testing.T) {
 
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": srcBackend, "b2": backendtest.NewInMemory()})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if !mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Fatal("drainOneObject should succeed when replica exists")
 	}
-	if srcBackend.Has("key1") {
+	if srcBackend.HasCopyOf("key1") {
 		t.Error("source object should have been deleted")
 	}
 }
@@ -369,18 +370,21 @@ func TestDrainOneObject_NoCopy_MovesObjectWithSize(t *testing.T) {
 		Return([]core.ObjectLocation{
 			{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4},
 		}, nil).AnyTimes()
-	store.EXPECT().MoveObjectLocation(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+	store.EXPECT().MoveObjectLocation(gomock.Any(), gomock.Any()).
 		Return(int64(4), nil).AnyTimes()
 	storetest.Permissive(store)
 
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": srcBackend, "b2": dstBackend})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if !mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Fatal("drainOneObject should succeed")
 	}
-	if !dstBackend.Has("key1") {
-		t.Error("destination backend should have the object")
+	// The move writes under a path of its own rather than the object's key, so
+	// the assertion is that something landed rather than that a particular name
+	// did - the name is minted per move and is nobody's to predict.
+	if len(dstBackend.Objects) != 1 {
+		t.Errorf("destination backend holds %d objects, want the moved one", len(dstBackend.Objects))
 	}
 }
 
@@ -400,9 +404,9 @@ func TestDrainOneObject_MoveLocationFails_EnqueuesOrphanWithSize(t *testing.T) {
 		Return([]core.ObjectLocation{
 			{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4},
 		}, nil).AnyTimes()
-	store.EXPECT().MoveObjectLocation(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+	store.EXPECT().MoveObjectLocation(gomock.Any(), gomock.Any()).
 		Return(int64(0), errors.New("serialization failure")).AnyTimes()
-	store.EXPECT().EnqueueCleanup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+	store.EXPECT().EnqueueCleanup(gomock.Any(), gomock.Any()).
 		DoAndReturn(stubDrainEnqueue(c)).AnyTimes()
 	storetest.Permissive(store)
 
@@ -410,7 +414,7 @@ func TestDrainOneObject_MoveLocationFails_EnqueuesOrphanWithSize(t *testing.T) {
 
 	dstBackend.DeleteErr = errors.New("backend down")
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Fatal("drainOneObject should fail when MoveObjectLocation fails")
 	}
@@ -439,15 +443,15 @@ func TestDrainOneObject_StaleObject_EnqueuesOrphanWithSize(t *testing.T) {
 		Return([]core.ObjectLocation{
 			{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4},
 		}, nil).AnyTimes()
-	store.EXPECT().MoveObjectLocation(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+	store.EXPECT().MoveObjectLocation(gomock.Any(), gomock.Any()).
 		Return(int64(0), nil).AnyTimes()
-	store.EXPECT().EnqueueCleanup(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+	store.EXPECT().EnqueueCleanup(gomock.Any(), gomock.Any()).
 		DoAndReturn(stubDrainEnqueue(c)).AnyTimes()
 	storetest.Permissive(store)
 
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": srcBackend, "b2": dstBackend})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Fatal("drainOneObject should return false for stale object")
 	}
@@ -468,7 +472,7 @@ func TestStartDrain_FlushesCleanupQueueBeforeDeleteBackendData(t *testing.T) {
 
 	c := &drainCalls{}
 	pending := []core.CleanupItem{
-		{ID: 42, BackendName: "b1", ObjectKey: "orphan", Attempts: 0},
+		{ID: 42, BackendName: "b1", ObjectKey: "orphan", StorageKey: "orphan", Attempts: 0},
 	}
 	delivered := false
 	ctrl := gomock.NewController(t)
@@ -520,7 +524,7 @@ func TestStartDrain_FlushesCleanupQueueBeforeDeleteBackendData(t *testing.T) {
 	if !slices.Contains(c.completed, 42) {
 		t.Error("expected cleanup item 42 to be completed during drain, but it was not")
 	}
-	if be.Has("orphan") {
+	if be.HasCopyOf("orphan") {
 		t.Error("orphaned object should have been deleted from S3 be")
 	}
 }
@@ -799,7 +803,7 @@ func TestDrainOneObject_GetAllLocationsFails(t *testing.T) {
 
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": backendtest.NewInMemory()})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if mgr.DrainOneObject(context.Background(), backendtest.NewInMemory(), "b1", obj) {
 		t.Error("expected failure when GetAllObjectLocations fails")
 	}
@@ -824,7 +828,7 @@ func TestDrainOneObject_DeleteSourceLocationFails(t *testing.T) {
 
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": srcBackend, "b2": backendtest.NewInMemory()})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Error("expected failure when DeleteObjectLocation fails")
 	}
@@ -846,7 +850,7 @@ func TestDrainOneObject_NoDestinationAvailable(t *testing.T) {
 	srcBackend := backendtest.NewInMemory()
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": srcBackend})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Error("expected failure when no destination available")
 	}
@@ -870,7 +874,7 @@ func TestDrainOneObject_StreamCopyFails(t *testing.T) {
 
 	mgr, _ := newDrainFleet(t, store, map[string]backend.ObjectBackend{"b1": srcBackend, "b2": dstBackend})
 
-	obj := &core.ObjectLocation{ObjectKey: "key1", BackendName: "b1", SizeBytes: 4}
+	obj := &core.ObjectLocation{ObjectKey: "key1", StorageKey: "key1", BackendName: "b1", SizeBytes: 4}
 	if mgr.DrainOneObject(context.Background(), srcBackend, "b1", obj) {
 		t.Error("expected failure when streamCopy fails")
 	}

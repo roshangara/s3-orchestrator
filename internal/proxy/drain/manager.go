@@ -41,7 +41,7 @@ type Runtime interface {
 	Backends() map[string]backend.ObjectBackend
 	GetBackend(name string) (backend.ObjectBackend, error)
 	BackendOrder() []string
-	StreamCopy(ctx context.Context, src, dst backend.CopyEndpoint, key string, sizeEstimate int64) (int64, error)
+	StreamCopy(ctx context.Context, src, dst backend.CopyEndpoint, srcKey, dstKey string, sizeEstimate int64) (int64, error)
 	DeleteWithTimeout(ctx context.Context, be backend.ObjectBackend, key string) error
 	Quota() *counter.QuotaTracker
 	Acct() *accounting.Recorder
@@ -51,7 +51,7 @@ type Runtime interface {
 // coordinator's shared primitives (orphan cleanup, MoveObjectLocation
 // CAS, source-delete accounting). *writepath.Coordinator satisfies it.
 type Mover interface {
-	DeleteOrEnqueue(ctx context.Context, be backend.ObjectBackend, backendName, key, reason string, sizeBytes int64)
+	DeleteOrEnqueue(ctx context.Context, be backend.ObjectBackend, c *core.CleanupRequest)
 	MoveObject(ctx context.Context, req *writepath.MoveRequest) (int64, error)
 }
 
@@ -428,7 +428,13 @@ func (d *Manager) removeReplicaSource(ctx context.Context, srcBackend backend.Ob
 			slog.String("key", obj.ObjectKey), slog.String("backend", srcName), "error", err)
 		return false
 	}
-	d.mover.DeleteOrEnqueue(ctx, srcBackend, srcName, obj.ObjectKey, "drain_source_delete", obj.SizeBytes)
+	d.mover.DeleteOrEnqueue(ctx, srcBackend, &core.CleanupRequest{
+		BackendName: srcName,
+		ObjectKey:   obj.ObjectKey,
+		StorageKey:  core.StoragePath(obj.ObjectKey, obj.StorageKey),
+		Reason:      "drain_source_delete",
+		SizeBytes:   obj.SizeBytes,
+	})
 
 	audit.Log(ctx, "storage.DrainRemoveReplica",
 		slog.String("key", obj.ObjectKey),
@@ -452,13 +458,15 @@ func (d *Manager) copyAndRemoveSource(ctx context.Context, srcBackend backend.Ob
 	}
 
 	movedSize, err := d.mover.MoveObject(ctx, &writepath.MoveRequest{
-		Key:         obj.ObjectKey,
-		SizeBytes:   obj.SizeBytes,
-		SrcBackend:  srcBackend,
-		SrcName:     srcName,
-		DestBackend: destBackend,
-		DestName:    destName,
-		Reasons:     writepath.DrainMoveReasons,
+		Key:            obj.ObjectKey,
+		SizeBytes:      obj.SizeBytes,
+		SrcBackend:     srcBackend,
+		SrcName:        srcName,
+		DestBackend:    destBackend,
+		DestName:       destName,
+		SrcStorageKey:  core.StoragePath(obj.ObjectKey, obj.StorageKey),
+		DestStorageKey: writepath.NewStorageKey(obj.ObjectKey),
+		Reasons:        writepath.DrainMoveReasons,
 	})
 	if err != nil {
 		if !errors.Is(err, writepath.ErrMoveStale) {

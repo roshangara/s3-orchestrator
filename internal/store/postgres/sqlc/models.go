@@ -56,6 +56,7 @@ type CleanupDlq struct {
 	FirstEnqueuedAt pgtype.Timestamptz
 	MovedAt         pgtype.Timestamptz
 	LastError       *string
+	StorageKey      string
 }
 
 type CleanupQueue struct {
@@ -70,6 +71,7 @@ type CleanupQueue struct {
 	SizeBytes   int64
 	ClaimedAt   pgtype.Timestamptz
 	ClaimedBy   *string
+	StorageKey  string
 }
 
 type Credential struct {
@@ -147,6 +149,7 @@ type ObjectLocation struct {
 	Etag                     *string
 	ContentType              *string
 	UserMetadata             []byte
+	StorageKey               string
 }
 
 type ObjectTag struct {
@@ -174,6 +177,7 @@ type PendingObject struct {
 	ContentType              *string
 	UserMetadata             []byte
 	Role                     string
+	StorageKey               string
 }
 
 type User struct {
